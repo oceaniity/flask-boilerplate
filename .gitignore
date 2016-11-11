@@ -1,0 +1,10 @@
+distribution/
+environment/
+eggs/
+build/
+instance/
+secrets/
+__pycache__/
+
+*.py[cod]
+*$py.class
