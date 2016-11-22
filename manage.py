@@ -9,11 +9,12 @@
 
 # internal package imports
 import argparse
-import configparser
-import gzip
+import signal
+import os
 #internal module imports
 from pathlib import Path
 from uuid import uuid4
+from functools import partial
 # external module imports
 
 def run_application(application, **kwargs):
@@ -21,10 +22,7 @@ def run_application(application, **kwargs):
     Run the application but exit if interrupted (so that it can actually be 
     closed on-demand).
     """
-    try:
-        application.run(**kwargs)
-    except (KeyboardInterrupt, SystemExit):
-        raise
+    application.run(**kwargs)
 
 def create_application(run_mode):
     """
@@ -38,10 +36,13 @@ def create_application(run_mode):
     _initialise_settings(application, run_mode)
     _setup_logging(application)
     _setup_templating(application)
-    # _setup_bundling(application)
     _setup_interceptors(application)
 
     return application
+
+def _kill_application(application, signal, frame):
+    application.logger.info('Interrupted with keyboard. Shutting down...')
+    quit()
 
 def _initialise_settings(application, run_mode):
     """
@@ -51,6 +52,7 @@ def _initialise_settings(application, run_mode):
     Add the config file data into the application config.
     """
     import json
+    import multiprocessing
     
     instance = Path(application.instance_path)
     if not instance.exists():
@@ -68,9 +70,10 @@ def _initialise_settings(application, run_mode):
                     'CSRF_KEY': str(uuid4()),
                     'RUN_MODE': 'DEVELOPMENT',
                     'CORS_ORIGIN': 'localhost',
+                    'HOST_NAME': 'localhost',
                     'PORT': 8080,
                     'PASSWORD_ROUNDS': 1,
-                    'FLASK_ASSETS_USE_S3': False
+                    'CPU_CORES': multiprocessing.cpu_count()
                 },
                 'TESTING': {
                     'RUN_MODE': 'TESTING'
@@ -79,9 +82,9 @@ def _initialise_settings(application, run_mode):
                     'LOG_LEVEL': 'WARNING',
                     'RUN_MODE': 'PRODUCTION',
                     'PORT': 443,
-                    'CORS_ORIGIN': 'client.bpanz.com',
-                    'PASSWORD_ROUNDS': 3000000,
-                    'FLASK_ASSETS_USE_S3': True    
+                    'CORS_ORIGIN': os.environ.get('hostname') or 'localhost',
+                    'HOST_NAME': os.environ.get('hostname') or 'localhost',
+                    'PASSWORD_ROUNDS': 3000000  
                 }
             }
             json.dump(configuration, output_configuration, indent=4, sort_keys=True)
@@ -105,7 +108,7 @@ def _setup_logging(application):
     
     log_level = application.config['LOG_LEVEL']
     log_formatter = Formatter(
-        '%(asctime)s - %(levelname)s {%(pathname)s:%(lineno)d} - %(message)s',
+        '%(asctime)s - %(levelname)8s {%(pathname)8s:%(lineno)4d} - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
@@ -134,7 +137,7 @@ def _setup_templating(application):
     import jinja2
     from flask import session
 
-    application_path = Path(application.instance_path).parent / 'application'
+    # application_path = Path(application.instance_path).parent / 'application'
     csrf_key = application.config['CSRF_KEY']
 
     def generate_csrf_token():
@@ -143,10 +146,6 @@ def _setup_templating(application):
         return session[csrf_key]
 
     application.jinja_env.globals[csrf_key] = generate_csrf_token
-
-# def _setup_bundling(application):
-#     from flask_assets import Environments, Bundle
-#     assets = Environment(application)
 
 def _setup_interceptors(application):
     """
@@ -157,6 +156,8 @@ def _setup_interceptors(application):
     """
     from itertools import chain
     from flask import request, g, abort
+    from gzip import compress
+
 
     @application.before_request
     def csrf_protect():
@@ -169,6 +170,16 @@ def _setup_interceptors(application):
             if not token or token != request.form.get('_csrf_token'):
                 application.logger.warning('Client tried to POST without csrf token.')
                 abort(404)
+
+    @application.after_request
+    def log_request(response):
+        """
+        After each request log it to the application logger with the address,
+        path, and status code.
+        """
+        application.logger.info('Served {} to {} with status {}'.format(
+            request.path, request.remote_addr, response.status_code))
+        return response
 
     @application.after_request
     def allow_origin(response):
@@ -188,10 +199,15 @@ def _setup_interceptors(application):
         if response.status_code not in chain(range(400, 599), range(200, 299)) or 'Content-Encoding' in response.headers:
             return response
 
-        response.data = gzip.compress(response.data)
+        original_length = len(response.data)
+        response.data = compress(response.data)
         response.headers.set('Content-Encoding', 'gzip')
         response.headers.set('Vary', 'Accept-Encoding')
         response.headers.set('Content-Length', len(response.data))
+
+        if application.config['LOG_LEVEL'] == 'DEBUG':
+            saved_bytes = original_length - len(response.data)
+            application.logger.debug('Saved {} bytes with gzip.'.format(saved_bytes))
 
         return response
 
@@ -209,13 +225,15 @@ def main():
     if run_mode in ['DEVELOPMENT', 'TESTING']:
         application = create_application(run_mode=run_mode)
         application.logger.info(
-            'Running application in {mode} mode.'.format(mode=application.config['RUN_MODE']))
+            'Running application in {} mode.'.format(application.config['RUN_MODE']))
         application.logger.info(
-            'Serving at {location}:{port}'.format(location=application.config['CORS_ORIGIN'], port=application.config['PORT']))
-        run_application(application, host='127.0.0.1', port=application.config['PORT'])
+            'Serving at {}:{}'.format(application.config['HOST_NAME'], application.config['PORT']))
 
-    else:
-        raise Exception()
+        signal.signal(signal.SIGINT, partial(_kill_application, application))
+        run_application(application,
+            host=application.config['HOST_NAME'],
+            port=application.config['PORT'],
+            processes=application.config['CPU_CORES'])
 
 if __name__ == '__main__':
     main()
