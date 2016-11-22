@@ -8,13 +8,13 @@
 """
 
 # internal package imports
-import logging
 import argparse
 import configparser
 import gzip
 #internal module imports
 from pathlib import Path
 from uuid import uuid4
+# external module imports
 
 def run_application(application, **kwargs):
     """
@@ -50,62 +50,81 @@ def _initialise_settings(application, run_mode):
     Create the config file if it does not already exist.
     Add the config file data into the application config.
     """
-    instance = Path(application.instance_path)
+    import json
     
+    instance = Path(application.instance_path)
     if not instance.exists():
         instance.mkdir()
 
-    configuration_file = instance / 'configuration.ini'
-    configuration = configparser.ConfigParser()
+    configuration_file = instance / 'configuration.json'
 
     if not configuration_file.exists():
-        with configuration_file.open('w') as output_file:
-            configuration['DEFAULT'] = {
-                'LOG_LEVEL': 'DEBUG',
-                'LOG_PATH': (instance / '{}.log'.format(run_mode)).as_posix(),
-                'SECRET_KEY': '{}'.format(uuid4().hex),
-                'CSRF_KEY': '{}'.format(uuid4().hex),
-                'RUN_MODE': 'DEVELOPMENT',
-                'CORS_ORIGIN': 'localhost',
-                'PORT': 5000,
-                'PASSWORD_ROUNDS': 1,
-                'FLASK_ASSETS_USE_S3': False
+        with configuration_file.open('w') as output_configuration:
+            configuration = {
+                'DEFAULT': {
+                    'LOG_LEVEL': 'DEBUG',
+                    'LOG_PATH': (instance / '{}.log'.format(run_mode.lower())).as_posix(),
+                    'SECRET_KEY': str(uuid4()),
+                    'CSRF_KEY': str(uuid4()),
+                    'RUN_MODE': 'DEVELOPMENT',
+                    'CORS_ORIGIN': 'localhost',
+                    'PORT': 8080,
+                    'PASSWORD_ROUNDS': 1,
+                    'FLASK_ASSETS_USE_S3': False
+                },
+                'TESTING': {
+                    'RUN_MODE': 'TESTING'
+                },
+                'PRODUCTION': {
+                    'LOG_LEVEL': 'WARNING',
+                    'RUN_MODE': 'PRODUCTION',
+                    'PORT': 443,
+                    'CORS_ORIGIN': 'client.bpanz.com',
+                    'PASSWORD_ROUNDS': 3000000,
+                    'FLASK_ASSETS_USE_S3': True    
+                }
             }
+            json.dump(configuration, output_configuration, indent=4, sort_keys=True)
 
-            configuration['TESTING'] = {
-                'RUN_MODE': 'TESTING'
-            }
-
-            configuration['PRODUCTION'] = {
-                'LOG_LEVEL': 'WARNING',
-                'RUN_MODE': 'PRODUCTION',
-                'PORT': 443,
-                'CORS_ORIGIN': 'client.bpanz.com'
-                'PASSWORD_ROUNDS': 3000000,
-                'FLASK_ASSETS_USE_S3': True
-            }
-
-            configuration.write(output_file)
-
-    configuration.read(configuration_file.as_posix())
-
-    application.config.update({
-        key.upper(): value for key, value in configuration[run_mode].items()
-    })
+    with configuration_file.open('r') as input_configuration:
+        configuration = json.load(input_configuration)
+        application.config.update({
+            key.upper(): value for key, value in {
+                **configuration.get('DEFAULT'),
+                **configuration.get(run_mode, {})
+            }.items()
+        })
 
 def _setup_logging(application):
     """
     Create a file logger and a console logger.
     """
-    log_level = application.config.get('LOG_LEVEL')
+    from logging import Formatter, StreamHandler, getLogger
+    from logging.handlers import RotatingFileHandler
+
+    
+    log_level = application.config['LOG_LEVEL']
+    log_formatter = Formatter(
+        '%(asctime)s - %(levelname)s {%(pathname)s:%(lineno)d} - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
     application.logger.handlers = []
     application.logger.setLevel(log_level)
 
-    console_handler = logging.StreamHandler()
+    console_handler = StreamHandler()
     console_handler.setLevel(log_level)
+    console_handler.setFormatter(log_formatter)
+
+    file_handler = RotatingFileHandler(application.config['LOG_PATH'], maxBytes=100000, backupCount=1)
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(log_formatter)
+
+    werkzeug_handler = getLogger('werkzeug')
+    werkzeug_handler.setLevel(log_level)
 
     application.logger.addHandler(console_handler)
+    application.logger.addHandler(file_handler)
 
 def _setup_templating(application):
     """
@@ -116,13 +135,11 @@ def _setup_templating(application):
     from flask import session
 
     application_path = Path(application.instance_path).parent / 'application'
+    csrf_key = application.config['CSRF_KEY']
 
     def generate_csrf_token():
-        csrf_key = application.config['CSRF_KEY']
-        
         if csrf_key not in session:
             session[csrf_key] = uuid4().hex
-
         return session[csrf_key]
 
     application.jinja_env.globals[csrf_key] = generate_csrf_token
@@ -138,36 +155,37 @@ def _setup_interceptors(application):
     Allow origin prevents unsightly CORS preflight requests.
     Compress response saves some data by compressing responses where compatible.
     """
-    from flask import request, response, g, abort
+    from itertools import chain
+    from flask import request, g, abort
 
     @application.before_request
     def csrf_protect():
-        g.set('ACCEPT_ENCODING', request.headers.get('Accept-Encoding', ''))
+        g.ACCEPT_ENCODING = request.headers.get('Accept-Encoding', '')
         csrf_key = application.config['CSRF_KEY']
         if request.method == 'POST':
             token = session.get(csrf_key)
             if application.config['RUN_MODE'] == 'PRODUCTION':
                 token = session.pop(csrf_key, None)
             if not token or token != request.form.get('_csrf_token'):
+                application.logger.warning('Client tried to POST without csrf token.')
                 abort(404)
 
     @application.after_request
     def allow_origin(response):
         if request.method != 'OPTIONS' and 'Origin' in request.headers:
             response.headers.set(
-                'Access-Control-Allow-Origin', application.config.get('CORS_ORIGIN')
+                'Access-Control-Allow-Origin', application.config['CORS_ORIGIN']
             )
         return response
 
     @application.after_request
     def compress_response(response):
-        accept_encoding = g.get('ACCEPT_ENCODING')
+        accept_encoding = g.ACCEPT_ENCODING
         if 'gzip' not in accept_encoding.lower():
             return response
 
         response.direct_passthrough = False
-
-        if response.status_code not in range(200, 299) or 'Content-Encoding' in response.headers:
+        if response.status_code not in chain(range(400, 599), range(200, 299)) or 'Content-Encoding' in response.headers:
             return response
 
         response.data = gzip.compress(response.data)
@@ -190,8 +208,11 @@ def main():
 
     if run_mode in ['DEVELOPMENT', 'TESTING']:
         application = create_application(run_mode=run_mode)
-
-        run_application(application, host='127.0.0.1', port=application.config.get('PORT'))
+        application.logger.info(
+            'Running application in {mode} mode.'.format(mode=application.config['RUN_MODE']))
+        application.logger.info(
+            'Serving at {location}:{port}'.format(location=application.config['CORS_ORIGIN'], port=application.config['PORT']))
+        run_application(application, host='127.0.0.1', port=application.config['PORT'])
 
     else:
         raise Exception()
