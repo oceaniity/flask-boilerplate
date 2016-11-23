@@ -36,8 +36,12 @@ def create_application(run_mode):
     _initialise_settings(application, run_mode)
     _setup_logging(application)
     _setup_ssl(application)
+    _setup_globals(application)
     _setup_templating(application)
-    _setup_interceptors(application)
+    _setup_csrf(application)
+    _setup_cors(application)
+    _setup_compression(application)
+    _setup_caching(application)
 
     return application
 
@@ -60,8 +64,12 @@ def _initialise_settings(application, run_mode):
     import multiprocessing
     
     instance = Path(application.instance_path)
+    cache_dir = instance/'cache'
     if not instance.exists():
         instance.mkdir()
+
+    if not cache_dir.exists():
+        cache_dir.mkdir()
 
     configuration_file = instance / 'configuration.json'
 
@@ -70,16 +78,18 @@ def _initialise_settings(application, run_mode):
 
             configuration = {
                 'DEFAULT': {
+                    'CACHE_DIR': cache_dir.as_posix(),
+                    'CACHE_PERIOD': 600,
+                    'CORS_ORIGIN': 'localhost',
+                    'CPU_CORES': multiprocessing.cpu_count(),
+                    'CSRF_KEY': str(uuid4()),
+                    'HOST_NAME': 'localhost',
                     'LOG_LEVEL': 'DEBUG',
                     'LOG_PATH': (instance / '{}.log'.format(run_mode.lower())).as_posix(),
-                    'SECRET_KEY': str(uuid4()),
-                    'CSRF_KEY': str(uuid4()),
-                    'RUN_MODE': 'DEVELOPMENT',
-                    'CORS_ORIGIN': 'localhost',
-                    'HOST_NAME': 'localhost',
-                    'PORT': 8080,
                     'PASSWORD_ROUNDS': 1,
-                    'CPU_CORES': multiprocessing.cpu_count()
+                    'PORT': 8080,
+                    'RUN_MODE': 'DEVELOPMENT',
+                    'SECRET_KEY': str(uuid4())
                 },
                 'TESTING': {
                     'RUN_MODE': 'TESTING'
@@ -105,14 +115,23 @@ def _initialise_settings(application, run_mode):
             }.items()
         })
 
+def _setup_globals(application):
+    from hashlib import md5
+    from flask import request, g
+
+    @application.before_request
+    def set_globals():
+        g.request_hash = md5(request.path.encode()).hexdigest()
+        g.accept_encoding = request.headers.get('Accept-Encoding', '')
+
 def _setup_logging(application):
     """
     Create a file logger and a console logger.
     """
     from logging import Formatter, StreamHandler, getLogger
     from logging.handlers import RotatingFileHandler
+    from flask import request
 
-    
     log_level = application.config['LOG_LEVEL']
     log_formatter = Formatter(
         '%(asctime)s - %(levelname)8s {%(pathname)8s:%(lineno)4d} - %(message)s',
@@ -136,9 +155,21 @@ def _setup_logging(application):
     application.logger.addHandler(console_handler)
     application.logger.addHandler(file_handler)
 
+    @application.after_request
+    def log_request(response):
+        """
+        After each request log it to the application logger with the address,
+        path, and status code.
+        """
+        application.logger.info('Served {} to {} with status {}'.format(
+            request.path, request.remote_addr, response.status_code))
+        return response
+
 def _setup_ssl(application):
     from werkzeug.serving import make_ssl_devcert
+
     instance = Path(application.instance_path)
+    
     if not (instance/'ssl.crt').exists():
         application.logger.info('No SSL certificate detected. Generating one...')
         try:
@@ -146,10 +177,35 @@ def _setup_ssl(application):
         except ImportError as error:
             application.logger.error(str(error))
             _halt_application(application)
+    
     application.config.update({
         'SSL_CERT': (instance/'ssl.crt').as_posix(),
         'SSL_KEY': (instance/'ssl.key').as_posix()
     })
+
+def _setup_caching(application):
+    from flask import request, Response, g
+    from werkzeug.contrib.cache import FileSystemCache
+
+    application.cache = FileSystemCache(application.config['CACHE_DIR'],
+        default_timeout=application.config['CACHE_PERIOD'])
+
+    @application.before_request
+    def return_cached():
+        if not request.values:
+            response_data = application.cache.get(g.request_hash)
+            if response_data:
+                application.logger.debug('Retrieving \'{path}\' ({hash}) from cache'.format(
+                    path=request.path, hash=g.request_hash[:6]))
+                response = Response()
+                response.set_data(response_data)
+                return response
+
+    @application.after_request
+    def cache_request(response):
+        if not request.values:
+            application.cache.set(g.request_hash, response.get_data(), application.config['CACHE_PERIOD'])
+        return response
 
 def _setup_templating(application):
     """
@@ -169,20 +225,15 @@ def _setup_templating(application):
 
     application.jinja_env.globals[csrf_key] = generate_csrf_token
 
-def _setup_interceptors(application):
+def _setup_csrf(application):
     """
-    Set up a few interceptors that act on requests.
     Csrf protect ensures that forms can't be messed with.
-    Allow origin prevents unsightly CORS preflight requests.
-    Compress response saves some data by compressing responses where compatible.
     """
-    from itertools import chain
-    from flask import request, redirect, g, abort
-    from gzip import compress
+    from flask import request, g, abort
 
     @application.before_request
     def csrf_protect():
-        g.ACCEPT_ENCODING = request.headers.get('Accept-Encoding', '')
+        g.accept_encoding = request.headers.get('Accept-Encoding', '')
         csrf_key = application.config['CSRF_KEY']
         if request.method == 'POST':
             token = session[csrf_key]
@@ -192,15 +243,8 @@ def _setup_interceptors(application):
                 application.logger.warning('Client tried to POST without csrf token.')
                 abort(404)
 
-    @application.after_request
-    def log_request(response):
-        """
-        After each request log it to the application logger with the address,
-        path, and status code.
-        """
-        application.logger.info('Served {} to {} with status {}'.format(
-            request.path, request.remote_addr, response.status_code))
-        return response
+def _setup_cors(application):
+    from flask import request
 
     @application.after_request
     def allow_origin(response):
@@ -210,9 +254,14 @@ def _setup_interceptors(application):
             )
         return response
 
+def _setup_compression(application):
+    from flask import g
+    from gzip import compress
+    from itertools import chain
+
     @application.after_request
     def compress_response(response):
-        accept_encoding = g.ACCEPT_ENCODING
+        accept_encoding = g.accept_encoding
         if 'gzip' not in accept_encoding.lower():
             return response
 
