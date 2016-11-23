@@ -45,6 +45,10 @@ def _kill_application(application, signal, frame):
     application.logger.info('Interrupted with keyboard. Shutting down...')
     quit()
 
+def _halt_application(application):
+    application.logger.info('Stopping...')
+    quit()
+
 def _initialise_settings(application, run_mode):
     """
     Use an instance folder and set up the application config. Prepare three
@@ -137,7 +141,11 @@ def _setup_ssl(application):
     instance = Path(application.instance_path)
     if not (instance/'ssl.crt').exists():
         application.logger.info('No SSL certificate detected. Generating one...')
-        cert, key = make_ssl_devcert((instance/'ssl').as_posix(), host=application.config['HOST_NAME'])
+        try:
+            cert, key = make_ssl_devcert((instance/'ssl').as_posix(), host=application.config['HOST_NAME'])
+        except ImportError as error:
+            application.logger.error(str(error))
+            _halt_application(application)
     application.config.update({
         'SSL_CERT': (instance/'ssl.crt').as_posix(),
         'SSL_KEY': (instance/'ssl.key').as_posix()
@@ -230,12 +238,18 @@ def main():
     Interpret some command line arguments to run the application.
     """
     option_parser = optparse.OptionParser()
-    option_parser.add_option('-M', '--mode', help="Mode in which to run the application")
-    option_parser.add_option('-P', '--port', help="Override the port on which to run.")
-    option_parser.add_option('-H', '--host', help="Override the host name.")
-    option_parser.add_option('-T', '--test', help="Run tests.")
-    option_parser.add_option('-C', '--cores', help="Number of cores to run on. Defaults to available core count.")
-    option_parser.add_option('-p', '--profile', action='store_true', dest='profile', help=optparse.SUPPRESS_HELP)
+    option_parser.add_option('-M', '--mode',
+        help="Mode in which to run the application")
+    option_parser.add_option('-P', '--port',
+        help="Override the port on which to run.")
+    option_parser.add_option('-H', '--host',
+        help="Override the host name.")
+    option_parser.add_option('-T', '--test',
+        help="Run tests.")
+    option_parser.add_option('-C', '--cores',
+        help="Number of cores to run on. Defaults to available core count.")
+    option_parser.add_option('-p', '--profile', action='store_true', dest='profile',
+        help=optparse.SUPPRESS_HELP)
     options, _ = option_parser.parse_args()
 
     run_mode = (options.mode or 'development').upper()

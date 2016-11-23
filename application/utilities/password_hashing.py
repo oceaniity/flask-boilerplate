@@ -7,8 +7,9 @@ def hash_password(password, salt=None, rounds=3000000):
 
     result = sha512(salt.encode() + password.encode())
     result = reduce(lambda x, y: sha512(x.digest()), range(rounds), result)
+    result = result.hexdigest()
 
-    return '{}${}${}'.format(rounds, salt, result.hexdigest())
+    return '{rounds}${salt}${result}'.format(rounds=rounds, salt=salt, result=result)
 
 def test_password(password_hash, test_phrase):
     rounds, salt, result = password_hash.split('$')
