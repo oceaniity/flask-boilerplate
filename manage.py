@@ -137,35 +137,36 @@ def _setup_logging(application):
     from copy import copy
     from flask import request
 
-    reset = "\033[0m"
-    bold = "\033[1m"
+    reset = '\033[0m'
+    bold = '\033[1m'
+    gray = '\033[30m'
 
-    colors = {
+    levels = {
         'debug': '\033[34m',
         'info': '\033[32m',
-        'gray': '\033[30m',
-        'warning': '\033[33m',
         'error': '\033[31m',
-        'violet': '\033[35m'
+        'warning': '\033[33m'
     }
 
     class ColorLogFormatter(Formatter):
         def __init__(self, message):
             Formatter.__init__(self, message)
+
         def format(self, record):
-            record = copy(record)
-            levelname = record.levelname.lower()
-            record.levelname = '{bold}{level_color}{levelname} {line_color}{pathname}:{lineno} {reset}{bold}{msg}{reset}'.format(
+            log = copy(record)
+            level = log.levelname.lower()
+            color, path, num, msg = levels[level], log.pathname, log.lineno, log.msg
+            log.levelname = '{bold}{color}{level} {gray}{path}:{num} {reset}{bold}{msg}{reset}'.format(
                 bold=bold,
-                level_color=colors[levelname],
-                levelname=levelname,
-                line_color=colors['gray'],
-                pathname=record.pathname,
-                lineno=record.lineno,
+                color=color,
+                level=level,
+                gray=gray,
+                path=path,
+                num=num,
                 reset=reset,
-                msg=record.msg
+                msg=msg
             )
-            return Formatter.format(self, record)
+            return Formatter.format(self, log)
 
     log_level = application.config['LOG_LEVEL']
     log_formatter = Formatter(
