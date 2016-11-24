@@ -1,4 +1,5 @@
 #! /usr/bin/env python3
+
 """
 
     # application manager
@@ -8,29 +9,51 @@
 """
 
 # internal package imports
+import multiprocessing
 import optparse
 import signal
+import json
 import os
-#internal module imports
-from pathlib import Path
-from uuid import uuid4
-from functools import partial
-# external module imports
 
-def run_application(application, **kwargs):
+# internal module imports
+from functools import partial
+from itertools import chain
+from logging import Formatter, StreamHandler, getLogger
+from pathlib import Path
+from hashlib import md5
+from gzip import compress
+from uuid import uuid4
+from copy import copy
+
+# internal sub-module imports
+from logging.handlers import RotatingFileHandler
+
+# external package imports
+import jinja2
+
+# external module imports
+from flask import Flask, Response, request, g, session, abort
+
+# external sub-module imports
+from werkzeug.contrib.cache import FileSystemCache
+from werkzeug.serving import make_ssl_devcert
+
+
+
+def run_application(application: Flask, **kwargs) -> None:
     """
     Run the application but exit if interrupted (so that it can actually be 
     closed on-demand).
     """
     application.run(**kwargs)
 
-def create_application(run_mode):
+
+
+def create_application(run_mode: str) -> Flask:
     """
     The goal here is to consolidate all the setup processes into their own
     functions and not muddy the waters with one giant setup function.
     """
-    from flask import Flask
-
     application = Flask(__name__)
 
     _initialise_settings(application, run_mode)
@@ -45,26 +68,27 @@ def create_application(run_mode):
 
     return application
 
-def _kill_application(application, signal, frame):
+
+
+def _kill_application(application: Flask, signal, frame) -> None:
     application.logger.info('Interrupted with keyboard.')
     _halt_application(application)
 
-def _halt_application(application):
+
+
+def _halt_application(application: Flask) -> None:
     application.logger.info('Stopping...')
     quit()
 
 
-def _initialise_settings(application, run_mode):
+
+def _initialise_settings(application: Flask, run_mode: str) -> None:
     """
     Use an instance folder and set up the application config. Prepare three
     environments: production, development, testing. Use development by default.
     Create the config file if it does not already exist.
     Add the config file data into the application config.
     """
-    import json
-    import multiprocessing
-    
-    
     instance = Path(application.instance_path)
     if not instance.exists():
         instance.mkdir()
@@ -110,24 +134,20 @@ def _initialise_settings(application, run_mode):
         configuration = json.load(input_configuration)
         application.config.update({**configuration['DEFAULT'], **configuration[run_mode]})
 
-def _setup_globals(application):
-    from hashlib import md5
-    from flask import request, g
 
+
+def _setup_globals(application: Flask) -> None:
     @application.before_request
     def set_globals():
         g.request_hash = md5(request.path.encode()).hexdigest()
         g.accept_encoding = request.headers.get('Accept-Encoding', '')
 
-def _setup_logging(application):
+
+
+def _setup_logging(application: Flask) -> None:
     """
     Create a file logger and a console logger.
     """
-    from logging import Formatter, StreamHandler, getLogger
-    from logging.handlers import RotatingFileHandler
-    from copy import copy
-    from flask import request
-
     reset, bold, gray = '\033[0m', '\033[1m', '\033[30m'
 
     levels = {
@@ -182,7 +202,7 @@ def _setup_logging(application):
     application.logger.addHandler(file_handler)
 
     @application.after_request
-    def log_request(response):
+    def log_request(response: Response) -> Response:
         """
         After each request log it to the application logger with the address,
         path, and status code.
@@ -192,9 +212,9 @@ def _setup_logging(application):
             path=path, address=address, code=code))
         return response
 
-def _setup_ssl(application):
-    from werkzeug.serving import make_ssl_devcert
 
+
+def _setup_ssl(application: Flask) -> None:
     instance = Path(application.instance_path)
     
     if not (instance/'ssl.crt').exists():
@@ -210,10 +230,9 @@ def _setup_ssl(application):
         'SSL_KEY': (instance/'ssl.key').as_posix()
     })
 
-def _setup_caching(application):
-    from flask import request, Response, g
-    from werkzeug.contrib.cache import FileSystemCache
 
+
+def _setup_caching(application: Flask) -> None:
     try:
         application.cache = FileSystemCache(application.config['CACHE_DIR'],
             default_timeout=application.config['CACHE_PERIOD'])
@@ -221,8 +240,9 @@ def _setup_caching(application):
         application.logger.error('Error creating cache. Check CACHE_DIR & CACHE_PERIOD in config.')
         _halt_application(application)
 
+
     @application.before_request
-    def return_cached():
+    def return_cached() -> Response:
         if not request.values:
             response_data = application.cache.get(g.request_hash)
             if response_data:
@@ -235,35 +255,35 @@ def _setup_caching(application):
 
 
     @application.after_request
-    def cache_request(response):
+    def cache_request(response: Response) -> Response:
         if not request.values:
             application.cache.set(g.request_hash, response.get_data(), application.config['CACHE_PERIOD'])
         return response
 
-def _setup_templating(application):
+
+
+def _setup_templating(application: Flask) -> None:
     """
     Automatically inject a csrf token into any form generated by jinja2.
     Use the randomly generated csrf key set in config for attribute lookup.
     """
-    import jinja2
-    from flask import session
 
     # application_path = Path(application.instance_path).parent / 'application'
     csrf_key = application.config['CSRF_KEY']
 
-    def generate_csrf_token():
+    def generate_csrf_token() -> str:
         if csrf_key not in session:
             session[csrf_key] = str(uuid4())
         return session[csrf_key]
 
     application.jinja_env.globals[csrf_key] = generate_csrf_token
 
-def _setup_csrf(application):
+
+
+def _setup_csrf(application: Flask) -> None:
     """
     Csrf protect ensures that forms can't be messed with.
     """
-    from flask import request, g, abort
-
     @application.before_request
     def csrf_protect():
         g.accept_encoding = request.headers.get('Accept-Encoding', '')
@@ -276,24 +296,22 @@ def _setup_csrf(application):
                 application.logger.warning('Client tried to POST without csrf token.')
                 abort(400)
 
-def _setup_cors(application):
-    from flask import request
 
+
+def _setup_cors(application: Flask) -> None:
     @application.after_request
-    def allow_origin(response):
+    def allow_origin(response: Response) -> Response:
         if request.method != 'OPTIONS' and 'Origin' in request.headers:
             response.headers.set(
                 'Access-Control-Allow-Origin', application.config['CORS_ORIGIN']
             )
         return response
 
-def _setup_compression(application):
-    from flask import g
-    from gzip import compress
-    from itertools import chain
 
+
+def _setup_compression(application: Flask) -> None:
     @application.after_request
-    def compress_response(response):
+    def compress_response(response: Response) -> Response:
         if 'gzip' not in g.accept_encoding.lower():
             return response
 
@@ -312,6 +330,7 @@ def _setup_compression(application):
             application.logger.debug('Saved {} bytes with gzip.'.format(saved_bytes))
 
         return response
+
 
 
 def main():
@@ -346,6 +365,8 @@ def main():
 
     signal.signal(signal.SIGINT, partial(_kill_application, application))
     run_application(application, host=host, port=port, processes=cores, ssl_context=ssl)
+
+
 
 if __name__ == '__main__':
     main()
