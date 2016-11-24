@@ -53,40 +53,6 @@ def _halt_application(application):
     application.logger.info('Stopping...')
     quit()
 
-def _create_configuration_file(instance, cache_dir, configuration_file, run_mode):
-    import json
-    import multiprocessing
-
-    configuration = {
-        'DEFAULT': {
-            'CACHE_DIR': cache_dir.as_posix(),
-            'CACHE_PERIOD': 600,
-            'CORS_ORIGIN': 'localhost',
-            'CPU_CORES': multiprocessing.cpu_count(),
-            'CSRF_KEY': str(uuid4()),
-            'HOST_NAME': 'localhost',
-            'LOG_LEVEL': 'DEBUG',
-            'LOG_PATH': (instance / '{}.log'.format(run_mode.lower())).as_posix(),
-            'PASSWORD_ROUNDS': 1,
-            'PORT': 8080,
-            'RUN_MODE': 'DEVELOPMENT',
-            'SECRET_KEY': str(uuid4())
-        },
-        'TESTING': {
-            'RUN_MODE': 'TESTING'
-        },
-        'PRODUCTION': {
-            'LOG_LEVEL': 'WARNING',
-            'RUN_MODE': 'PRODUCTION',
-            'PORT': 80,
-            'CORS_ORIGIN': os.environ.get('hostname') or 'localhost',
-            'HOST_NAME': os.environ.get('hostname') or 'localhost',
-            'PASSWORD_ROUNDS': 3000000  
-        }
-    }
-
-    with configuration_file.open('w') as output_configuration:
-        json.dump(configuration, output_configuration, indent=4, sort_keys=True)
 
 def _initialise_settings(application, run_mode):
     """
@@ -96,28 +62,53 @@ def _initialise_settings(application, run_mode):
     Add the config file data into the application config.
     """
     import json
+    import multiprocessing
+    
     
     instance = Path(application.instance_path)
-    cache_dir = instance/'cache'
     if not instance.exists():
         instance.mkdir()
 
+    cache_dir = instance / 'cache'
     if not cache_dir.exists():
         cache_dir.mkdir()
 
     configuration_file = instance / 'configuration.json'
 
     if not configuration_file.exists():
-        _create_configuration_file(instance, cache_dir, configuration_file, run_mode)
+        configuration = {
+            'DEFAULT': {
+                'CACHE_DIR': cache_dir.as_posix(),
+                'CACHE_PERIOD': 6000,
+                'CORS_ORIGIN': 'localhost',
+                'CPU_CORES': multiprocessing.cpu_count(),
+                'CSRF_KEY': str(uuid4()),
+                'HOST_NAME': 'localhost',
+                'LOG_LEVEL': 'DEBUG',
+                'LOG_PATH': (instance / '{run_mode}.log'.format(run_mode=run_mode)).as_posix(),
+                'PASSWORD_ROUNDS': 1,
+                'PORT': 8080,
+                'RUN_MODE': 'DEVELOPMENT',
+                'SECRET_KEY': str(uuid4())
+            },
+            'PRODUCTION': {
+                'LOG_LEVEL': 'WARNING',
+                'RUN_MODE': 'PRODUCTION',
+                'PORT': 80,
+                'CORS_ORIGIN': os.getenv('hostname') or 'localhost',
+                'HOST_NAME': os.getenv('hostname') or 'localhost',
+                'PASSWORD_ROUNDS': 5000000  
+            },
+            'TESTING': {'RUN_MODE': 'TESTING'},
+            'DEVELOPMENT': {}
+        }
+
+        with configuration_file.open('w') as output_configuration:
+            json.dump(configuration, output_configuration, indent=4, sort_keys=True)
 
     with configuration_file.open('r') as input_configuration:
         configuration = json.load(input_configuration)
-        application.config.update({
-            key.upper(): value for key, value in {
-                **configuration.get('DEFAULT'),
-                **configuration.get(run_mode, {})
-            }.items()
-        })
+        application.config.update({**configuration['DEFAULT'], **configuration[run_mode]})
 
 def _setup_globals(application):
     from hashlib import md5
@@ -137,9 +128,7 @@ def _setup_logging(application):
     from copy import copy
     from flask import request
 
-    reset = '\033[0m'
-    bold = '\033[1m'
-    gray = '\033[30m'
+    reset, bold, gray = '\033[0m', '\033[1m', '\033[30m'
 
     levels = {
         'debug': '\033[34m',
@@ -198,8 +187,9 @@ def _setup_logging(application):
         After each request log it to the application logger with the address,
         path, and status code.
         """
-        application.logger.info('Served {} to {} with status {}'.format(
-            request.path, request.remote_addr, response.status_code))
+        path, address, code = request.path, request.remote_addr, response.status_code
+        application.logger.info('Served {path} to {address} with status {code}'.format(
+            path=path, address=address, code=code))
         return response
 
 def _setup_ssl(application):
@@ -236,8 +226,9 @@ def _setup_caching(application):
         if not request.values:
             response_data = application.cache.get(g.request_hash)
             if response_data:
+                path, hash = request.path, g.request_hash[-7:]
                 application.logger.debug('Retrieving \'{path}\' ({hash}) from cache'.format(
-                    path=request.path, hash=g.request_hash[-7:]))
+                    path=path, hash=hash))
                 response = Response()
                 response.set_data(response_data)
                 return response
@@ -350,8 +341,8 @@ def main():
         application.wsgi_app = ProfilerMiddleware(application.wsgi_app, restrictions=[30])
         application.logger.debug('Running profiler.')
 
-    application.logger.info('Running application in {} mode.'.format(run_mode))
-    application.logger.info('Serving at {}:{}'.format(host, port))
+    application.logger.info('Running application in {run_mode} mode.'.format(run_mode=run_mode))
+    application.logger.info('Serving at {host}:{port}'.format(host=host, port=port))
 
     signal.signal(signal.SIGINT, partial(_kill_application, application))
     run_application(application, host=host, port=port, processes=cores, ssl_context=ssl)
