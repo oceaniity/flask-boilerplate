@@ -195,7 +195,7 @@ def _setup_caching(application):
         application.cache = FileSystemCache(application.config['CACHE_DIR'],
             default_timeout=application.config['CACHE_PERIOD'])
     except KeyError as error:
-        application.logger.error('Problem creating cache. CACHE_DIR and CACHE_PERIOD in config file?')
+        application.logger.error('Error creating cache. Check CACHE_DIR & CACHE_PERIOD in config.')
         _halt_application(application)
 
     @application.before_request
@@ -248,9 +248,9 @@ def _setup_csrf(application):
             token = session[csrf_key]
             if application.config['RUN_MODE'] == 'PRODUCTION':
                 token = session.pop(csrf_key, None)
-            if not token or token != request.form.get('_csrf_token'):
+            if not token or token != request.form.get(csrf_key):
                 application.logger.warning('Client tried to POST without csrf token.')
-                abort(404)
+                abort(400)
 
 def _setup_cors(application):
     from flask import request
