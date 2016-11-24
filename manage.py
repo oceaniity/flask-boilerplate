@@ -134,20 +134,52 @@ def _setup_logging(application):
     """
     from logging import Formatter, StreamHandler, getLogger
     from logging.handlers import RotatingFileHandler
+    from copy import copy
     from flask import request
+
+    reset = "\033[0m"
+    bold = "\033[1m"
+
+    colors = {
+        'debug': '\033[34m',
+        'info': '\033[32m',
+        'gray': '\033[30m',
+        'warning': '\033[33m',
+        'error': '\033[31m',
+        'violet': '\033[35m'
+    }
+
+    class ColorLogFormatter(Formatter):
+        def __init__(self, message):
+            Formatter.__init__(self, message)
+        def format(self, record):
+            record = copy(record)
+            levelname = record.levelname.lower()
+            record.levelname = '{bold}{level_color}{levelname} {line_color}{pathname}:{lineno} {reset}{bold}{msg}{reset}'.format(
+                bold=bold,
+                level_color=colors[levelname],
+                levelname=levelname,
+                line_color=colors['gray'],
+                pathname=record.pathname,
+                lineno=record.lineno,
+                reset=reset,
+                msg=record.msg
+            )
+            return Formatter.format(self, record)
 
     log_level = application.config['LOG_LEVEL']
     log_formatter = Formatter(
-        '%(asctime)s - %(levelname)8s {%(pathname)8s:%(lineno)4d} - %(message)s',
+        '%(asctime)s - %(levelname)8s %(pathname)8s:%(lineno)4d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+    color_log_formatter = ColorLogFormatter('%(levelname)s')
 
     application.logger.handlers = []
     application.logger.setLevel(log_level)
 
     console_handler = StreamHandler()
     console_handler.setLevel(log_level)
-    console_handler.setFormatter(log_formatter)
+    console_handler.setFormatter(color_log_formatter)
 
     file_handler = RotatingFileHandler(application.config['LOG_PATH'], maxBytes=100000, backupCount=1)
     file_handler.setLevel(log_level)
