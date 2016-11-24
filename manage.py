@@ -46,12 +46,47 @@ def create_application(run_mode):
     return application
 
 def _kill_application(application, signal, frame):
-    application.logger.info('Interrupted with keyboard. Shutting down...')
-    quit()
+    application.logger.info('Interrupted with keyboard.')
+    _halt_application(application)
 
 def _halt_application(application):
     application.logger.info('Stopping...')
     quit()
+
+def _create_configuration_file(instance, cache_dir, configuration_file, run_mode):
+    import json
+    import multiprocessing
+
+    configuration = {
+        'DEFAULT': {
+            'CACHE_DIR': cache_dir.as_posix(),
+            'CACHE_PERIOD': 600,
+            'CORS_ORIGIN': 'localhost',
+            'CPU_CORES': multiprocessing.cpu_count(),
+            'CSRF_KEY': str(uuid4()),
+            'HOST_NAME': 'localhost',
+            'LOG_LEVEL': 'DEBUG',
+            'LOG_PATH': (instance / '{}.log'.format(run_mode.lower())).as_posix(),
+            'PASSWORD_ROUNDS': 1,
+            'PORT': 8080,
+            'RUN_MODE': 'DEVELOPMENT',
+            'SECRET_KEY': str(uuid4())
+        },
+        'TESTING': {
+            'RUN_MODE': 'TESTING'
+        },
+        'PRODUCTION': {
+            'LOG_LEVEL': 'WARNING',
+            'RUN_MODE': 'PRODUCTION',
+            'PORT': 80,
+            'CORS_ORIGIN': os.environ.get('hostname') or 'localhost',
+            'HOST_NAME': os.environ.get('hostname') or 'localhost',
+            'PASSWORD_ROUNDS': 3000000  
+        }
+    }
+
+    with configuration_file.open('w') as output_configuration:
+        json.dump(configuration, output_configuration, indent=4, sort_keys=True)
 
 def _initialise_settings(application, run_mode):
     """
@@ -61,7 +96,6 @@ def _initialise_settings(application, run_mode):
     Add the config file data into the application config.
     """
     import json
-    import multiprocessing
     
     instance = Path(application.instance_path)
     cache_dir = instance/'cache'
@@ -74,37 +108,7 @@ def _initialise_settings(application, run_mode):
     configuration_file = instance / 'configuration.json'
 
     if not configuration_file.exists():
-        with configuration_file.open('w') as output_configuration:
-
-            configuration = {
-                'DEFAULT': {
-                    'CACHE_DIR': cache_dir.as_posix(),
-                    'CACHE_PERIOD': 600,
-                    'CORS_ORIGIN': 'localhost',
-                    'CPU_CORES': multiprocessing.cpu_count(),
-                    'CSRF_KEY': str(uuid4()),
-                    'HOST_NAME': 'localhost',
-                    'LOG_LEVEL': 'DEBUG',
-                    'LOG_PATH': (instance / '{}.log'.format(run_mode.lower())).as_posix(),
-                    'PASSWORD_ROUNDS': 1,
-                    'PORT': 8080,
-                    'RUN_MODE': 'DEVELOPMENT',
-                    'SECRET_KEY': str(uuid4())
-                },
-                'TESTING': {
-                    'RUN_MODE': 'TESTING'
-                },
-                'PRODUCTION': {
-                    'LOG_LEVEL': 'WARNING',
-                    'RUN_MODE': 'PRODUCTION',
-                    'PORT': 80,
-                    'CORS_ORIGIN': os.environ.get('hostname') or 'localhost',
-                    'HOST_NAME': os.environ.get('hostname') or 'localhost',
-                    'PASSWORD_ROUNDS': 3000000  
-                }
-            }
-            
-            json.dump(configuration, output_configuration, indent=4, sort_keys=True)
+        _create_configuration_file(instance, cache_dir, configuration_file, run_mode)
 
     with configuration_file.open('r') as input_configuration:
         configuration = json.load(input_configuration)
@@ -187,8 +191,12 @@ def _setup_caching(application):
     from flask import request, Response, g
     from werkzeug.contrib.cache import FileSystemCache
 
-    application.cache = FileSystemCache(application.config['CACHE_DIR'],
-        default_timeout=application.config['CACHE_PERIOD'])
+    try:
+        application.cache = FileSystemCache(application.config['CACHE_DIR'],
+            default_timeout=application.config['CACHE_PERIOD'])
+    except KeyError as error:
+        application.logger.error('Problem creating cache. CACHE_DIR and CACHE_PERIOD in config file?')
+        _halt_application(application)
 
     @application.before_request
     def return_cached():
@@ -196,10 +204,11 @@ def _setup_caching(application):
             response_data = application.cache.get(g.request_hash)
             if response_data:
                 application.logger.debug('Retrieving \'{path}\' ({hash}) from cache'.format(
-                    path=request.path, hash=g.request_hash[:6]))
+                    path=request.path, hash=g.request_hash[-7:]))
                 response = Response()
                 response.set_data(response_data)
                 return response
+
 
     @application.after_request
     def cache_request(response):
@@ -261,8 +270,7 @@ def _setup_compression(application):
 
     @application.after_request
     def compress_response(response):
-        accept_encoding = g.accept_encoding
-        if 'gzip' not in accept_encoding.lower():
+        if 'gzip' not in g.accept_encoding.lower():
             return response
 
         response.direct_passthrough = False
@@ -286,20 +294,13 @@ def main():
     """
     Interpret some command line arguments to run the application.
     """
-    option_parser = optparse.OptionParser()
-    option_parser.add_option('-M', '--mode',
-        help="Mode in which to run the application")
-    option_parser.add_option('-P', '--port',
-        help="Override the port on which to run.")
-    option_parser.add_option('-H', '--host',
-        help="Override the host name.")
-    option_parser.add_option('-T', '--test',
-        help="Run tests.")
-    option_parser.add_option('-C', '--cores',
-        help="Number of cores to run on. Defaults to available core count.")
-    option_parser.add_option('-p', '--profile', action='store_true', dest='profile',
-        help=optparse.SUPPRESS_HELP)
-    options, _ = option_parser.parse_args()
+    parser = optparse.OptionParser()
+    parser.add_option('-M', '--mode', help="Mode in which to run the application")
+    parser.add_option('-P', '--port', help="Override the port on which to run.")
+    parser.add_option('-H', '--host', help="Override the host name.")
+    parser.add_option('-C', '--cores', help="Run on x processes. Defaults to CPU count.")
+    parser.add_option('-p', '--profile', action='store_true', help=optparse.SUPPRESS_HELP)
+    options, _ = parser.parse_args()
 
     run_mode = (options.mode or 'development').upper()
 
