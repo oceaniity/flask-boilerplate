@@ -100,38 +100,40 @@ def _initialise_settings(application: Flask, run_mode: str) -> None:
     configuration_file = instance / 'configuration.json'
 
     if not configuration_file.exists():
+        host = os.getenv('hostname') or 'localhost'
         configuration = {
             'DEFAULT': {
-                'CACHE_DIR': cache_dir.as_posix(),
-                'CACHE_PERIOD': 6000,
-                'CORS_ORIGIN': 'localhost',
-                'CPU_CORES': multiprocessing.cpu_count(),
-                'CSRF_KEY': str(uuid4()),
-                'HOST_NAME': 'localhost',
-                'LOG_LEVEL': 'DEBUG',
-                'LOG_PATH': (instance / '{run_mode}.log'.format(run_mode=run_mode)).as_posix(),
                 'PASSWORD_ROUNDS': 1,
-                'PORT': 8080,
-                'RUN_MODE': 'DEVELOPMENT',
-                'SECRET_KEY': str(uuid4())
-            },
-            'PRODUCTION': {
-                'LOG_LEVEL': 'WARNING',
-                'RUN_MODE': 'PRODUCTION',
-                'PORT': 80,
-                'CORS_ORIGIN': os.getenv('hostname') or 'localhost',
-                'HOST_NAME': os.getenv('hostname') or 'localhost',
-                'PASSWORD_ROUNDS': 5000000  
-            },
-            'TESTING': {'RUN_MODE': 'TESTING'},
-            'DEVELOPMENT': {}
+                'CACHE_PERIOD': 6000,
+                'CORS_ORIGIN': host,
+                'SECRET_KEY': str(uuid4()),
+                'CACHE_DIR': cache_dir.as_posix(),
+                'PROCESSES': multiprocessing.cpu_count(),
+                'LOG_LEVEL': 'DEBUG',
+                'HOST_NAME': host,
+                'CSRF_KEY': str(uuid4()),
+                'PORT': 8080
+            }
         }
 
-        with configuration_file.open('w') as output_configuration:
-            json.dump(configuration, output_configuration, indent=4, sort_keys=True)
+        for mode in ['TESTING', 'PRODUCTION', 'DEVELOPMENT']:
+            configuration[mode] = {
+                'LOG_PATH': (instance / '{mode}.log'.format(mode=mode)).as_posix(),
+                'RUN_MODE': mode,
+                'DB_PATH': (instance / '{mode}.db'.format(mode=mode)).as_posix()
+            }
 
-    with configuration_file.open('r') as input_configuration:
-        configuration = json.load(input_configuration)
+        configuration['PRODUCTION'].update({
+            'PASSWORD_ROUNDS': 5000000,
+            'LOG_LEVEL': 'WARNING',
+            'PORT': 80
+        })
+
+        with configuration_file.open('w') as output_file:
+            json.dump(configuration, output_file, indent=4, sort_keys=True)
+
+    with configuration_file.open('r') as input_file:
+        configuration = json.load(input_file)
         application.config.update({**configuration['DEFAULT'], **configuration[run_mode]})
 
 
@@ -316,18 +318,20 @@ def _setup_compression(application: Flask) -> None:
             return response
 
         response.direct_passthrough = False
-        if response.status_code not in chain(range(400, 599), range(200, 299)) or 'Content-Encoding' in response.headers:
+        code_range = chain(range(400, 599), range(200, 299))
+
+        if response.status_code not in code_range or 'Content-Encoding' in response.headers:
             return response
 
-        original_length = len(response.data)
+        data_length = len(response.data)
         response.data = compress(response.data)
         response.headers.set('Content-Encoding', 'gzip')
         response.headers.set('Vary', 'Accept-Encoding')
         response.headers.set('Content-Length', len(response.data))
 
         if application.config['LOG_LEVEL'] == 'DEBUG':
-            saved_bytes = original_length - len(response.data)
-            application.logger.debug('Saved {} bytes with gzip.'.format(saved_bytes))
+            delta = data_length - len(response.data)
+            application.logger.debug('Saved {delta} bytes with gzip.'.format(delta=delta))
 
         return response
 
@@ -351,8 +355,8 @@ def main():
 
     host = options.host or application.config['HOST_NAME']
     port = options.port or application.config['PORT']
-    cores = options.cores or application.config['CPU_CORES']
-    ssl = (application.config['SSL_CERT'], application.config['SSL_KEY'])
+    processes = options.cores or application.config['PROCESSES']
+    ssl_context = (application.config['SSL_CERT'], application.config['SSL_KEY'])
 
     if options.profile:
         from werkzeug.contrib.profiler import ProfilerMiddleware
@@ -364,7 +368,7 @@ def main():
     application.logger.info('Serving at {host}:{port}'.format(host=host, port=port))
 
     signal.signal(signal.SIGINT, partial(_kill_application, application))
-    run_application(application, host=host, port=port, processes=cores, ssl_context=ssl)
+    run_application(application, host=host, port=port, processes=processes, ssl_context=ssl_context)
 
 
 
